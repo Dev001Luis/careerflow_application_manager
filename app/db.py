@@ -1,59 +1,57 @@
-# app/db.py
-"""
-Database connection helper.
-
-Provides a DBConnection singleton that opens a single mysql.connector connection for the
-application lifetime (can be adjusted later for connection pooling). Also provides a
-context manager `get_cursor()` that yields a cursor and commits on successful exit.
-
-We use long descriptive names and docstrings for clarity.
-"""
-
 import os
-from contextlib import contextmanager
 import mysql.connector
+from mysql.connector import Error
+from contextlib import contextmanager
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
 class DatabaseConnectionSingleton:
     """
-    Singleton wrapper around a MySQL connection.
-    Usage:
-        db_singleton = DatabaseConnectionSingleton()
-        connection = db_singleton.get_connection()
+    Singleton class to manage a single MySQL connection instance throughout the application.
+    Prevents redundant connections and ensures stability.
     """
+
     _instance = None
+    _connection = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(DatabaseConnectionSingleton, cls).__new__(cls)
-            cls._instance._connection = mysql.connector.connect(
-                host=os.getenv("DB_HOST", "localhost"),
-                user=os.getenv("DB_USER", "root"),
-                password=os.getenv("DB_PASSWORD", ""),
-                database=os.getenv("DB_NAME", "")
-            )
+            try:
+                cls._instance._connection = mysql.connector.connect(
+                    host=os.getenv("MYSQL_HOST", "localhost"),
+                    user=os.getenv("MYSQL_USER", "root"),
+                    password=os.getenv("MYSQL_PASSWORD", ""),
+                    database=os.getenv("MYSQL_DATABASE", "careerflow_db"),
+                    port=int(os.getenv("MYSQL_PORT", 3306))
+                )
+                print("✅ MySQL connection established successfully.")
+            except Error as e:
+                print(f"❌ Error while connecting to MySQL: {e}")
+                raise e
         return cls._instance
 
     def get_connection(self):
-        """Return the underlying mysql.connector connection object."""
+        """Return the active MySQL connection."""
         return self._connection
 
 
 @contextmanager
-def get_cursor(dictionary: bool = True):
+def get_cursor():
     """
-    Context manager that yields a cursor and commits the connection on exit.
-    Example:
-        with get_cursor() as cursor:
-            cursor.execute("SELECT ...")
-            rows = cursor.fetchall()
+    Context manager that yields a MySQL cursor and handles commit/rollback logic.
+    Ensures clean resource handling and prevents connection leaks.
     """
     connection = DatabaseConnectionSingleton().get_connection()
-    cursor = connection.cursor(dictionary=dictionary)
+    cursor = connection.cursor(dictionary=True)
     try:
         yield cursor
         connection.commit()
+    except Exception as e:
+        connection.rollback()
+        print(f"❌ Database error: {e}")
+        raise
     finally:
         cursor.close()

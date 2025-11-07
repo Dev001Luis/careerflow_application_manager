@@ -1,0 +1,33 @@
+{% if jobs and jobs|length > 0 %}
+<table class="table table-hover align-middle text-sm shadow-sm rounded-2 overflow-hidden">
+    <thead class="table-light">
+        <tr>
+            <th>Job Title</th>
+            <th>Company</th>
+            <th>Location</th>
+            <th>Date Added</th>
+            <th>Link</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for job in jobs %}
+        <tr>
+            <td>{{ job.title }}</td>
+            <td>{{ job.company }}</td>
+            <td>{{ job.location or "—" }}</td>
+            <td>{{ job.date_added.strftime("%Y-%m-%d") if job.date_added else "—" }}</td>
+            <td>
+                <a href="{{ job.link }}" target="_blank" class="btn btn-outline-primary btn-sm">
+                    View
+                </a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="alert alert-secondary text-center py-3 mt-2 rounded">
+    <i class="fa-solid fa-circle-info me-2"></i>
+    No jobs found yet — upload your LinkedIn saved-jobs HTML file to import them.
+</div>
+{% endif %}

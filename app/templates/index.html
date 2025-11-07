@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CareerFlow — Application Manager</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <h1>CareerFlow — Application Manager</h1>
+    <h5><blockquote>"Finding a job, is also a job"</blockquote></h5>
+
+    <section class="uploader">
+      <form id="uploadLinkedInForm" enctype="multipart/form-data">
+        <label for="linkedinFileInput">Upload LinkedIn "Saved Jobs" HTML file</label>
+        <input type="file" id="linkedinFileInput" name="file" accept=".html,.htm">
+        <button id="uploadLinkedInButton" data-ajax-target="#jobList" type="submit">Upload & Import</button>
+      </form>
+      <div id="uploadMessage" class="info"></div>
+    </section>
+
+    <section id="jobList" class="jobs-list">
+      {% include "_jobs_list.html" %}
+    </section>
+
+  </div>
+
+  <script src="{{ url_for('static', filename='js/ajax_swap.js') }}"></script>
+</body>
+</html>

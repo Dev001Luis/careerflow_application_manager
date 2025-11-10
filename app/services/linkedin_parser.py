@@ -1,79 +1,253 @@
-# app/services/linkedin_parser.py
 """
-LinkedIn HTML parser service.
+LinkedIn HTML parser (robust).
 
-Parses an uploaded LinkedIn saved/jobs HTML file and extracts job entries.
-The exact selectors may differ with LinkedIn changes — this parser is resilient
-and returns Job objects with best-effort extraction.
+This parser is resilient to LinkedIn's common patterns:
+ - embedded JSON inside <code> or <script> tags that is HTML-escaped (e.g. &quot;)
+ - fragmented JSON where many fields are null but navigationUrl or job URL is present
+ - cases where JSON parsing fails, using regex fallback to find /jobs/view/ links
+
+It returns a list of dicts: { "title": str, "company": str, "link": str }
 """
 
 from bs4 import BeautifulSoup
-from typing import List
-from app.models.job import Job
+import json
+import re
+import html
+from typing import List, Dict, Any
+
 
 class LinkedInHtmlParser:
-    """
-    Given raw HTML (from LinkedIn saved jobs page), attempt to extract job cards.
-    """
     def __init__(self, raw_html: str):
         self.soup = BeautifulSoup(raw_html, "html.parser")
 
-    def extract_jobs_from_saved_page(self) -> List[Job]:
+    def extract_jobs_from_saved_page(self): # -> List[Job]:
         """
-        Extract job entries and return a list of Job objects.
-        Note: selectors are intentionally permissive; LinkedIn markup changes often.
+        Top-level entrypoint.
+        Parse the LinkedIn HTML, extract job data (title, company, link),
+        deduplicate by link, and return a list of Job objects.
         """
-        extracted_jobs: List[Job] = []
+        from app.models.job import Job  # imported here to avoid circular import
 
-        # Try some common patterns for job items — adjust if LinkedIn page structure differs
-        # We look for anchor tags with job title or list items that appear like job cards.
-        possible_job_elements = self.soup.select("a")  # fallback: iterate anchors and inspect attributes
+        collected_jobs: List[Dict[str, str]] = []
 
-        for element in possible_job_elements:
-            # Heuristics: anchor with href that contains '/jobs/view/' or contains keywords
-            href = element.get("href", "")
-            text = element.get_text(separator=" ", strip=True)
+        # Look in <code> and <script> tags for embedded JSON
+        candidate_tags = self.soup.find_all(["code", "script"])
+
+        for tag in candidate_tags:
+            text = tag.get_text(separator="", strip=True)
             if not text:
                 continue
 
-            # very lightweight filtering heuristics:
-            if "/jobs/view/" in href or "jobs" in href and (" · " in text or "|" in text or "-" in text):
-                # derive title and company by splitting text heuristically
-                title_text = text
-                company_text = None
-                # if there is a newline or separator, try to split
-                for separator in ["\n", " | ", " · ", " - "]:
-                    if separator in text:
-                        parts = [p.strip() for p in text.split(separator) if p.strip()]
-                        if len(parts) >= 2:
-                            title_text = parts[0]
-                            company_text = parts[1]
-                            break
+            # Decode HTML entities (turn &quot; into ")
+            unescaped_text = html.unescape(text)
 
-                job = Job(
-                    title=title_text[:250],
-                    company=company_text[:250] if company_text else None,
-                    link=href,
-                    category=None
-                )
-                extracted_jobs.append(job)
+            # Try JSON parse first
+            parsed_jobs = self._try_parse_json_and_extract_jobs(unescaped_text)
+            if parsed_jobs:
+                collected_jobs.extend(parsed_jobs)
+                continue
 
-        # If none found by heuristics, try a different strategy: find elements that look like saved job cards
-        if not extracted_jobs:
-            # Example: look for list items with job-card classes (LinkedIn changes often)
-            card_elements = self.soup.select("li")
-            for card in card_elements:
-                text = card.get_text(separator=" ", strip=True)
-                if not text:
-                    continue
-                if "Applied" in text or "Saved" in text or "See job" in text:
-                    # best effort
-                    anchor = card.find("a", href=True)
-                    href = anchor["href"] if anchor else None
-                    title_candidate = card.find(["h3", "h4"])
-                    company_candidate = card.find(["h4", "h5", "span"])
-                    title_text = title_candidate.get_text(strip=True) if title_candidate else text[:120]
-                    company_text = company_candidate.get_text(strip=True) if company_candidate else None
-                    extracted_jobs.append(Job(title=title_text, company=company_text, link=href, category=None))
+            # Fallback to regex
+            fallback_jobs = self._regex_extract_jobs_from_text(unescaped_text)
+            if fallback_jobs:
+                collected_jobs.extend(fallback_jobs)
 
-        return extracted_jobs
+        # Deduplicate by link (prefer non-empty title/company)
+        unique_by_link: Dict[str, Dict[str, str]] = {}
+        for job in collected_jobs:
+            link = job.get("link")
+            if not link:
+                continue
+            if link not in unique_by_link:
+                unique_by_link[link] = job
+            else:
+                # merge missing fields
+                existing = unique_by_link[link]
+                if not existing.get("title") and job.get("title"):
+                    existing["title"] = job["title"]
+                if not existing.get("company") and job.get("company"):
+                    existing["company"] = job["company"]
+
+        # Convert dicts → Job objects for consistency with the service layer
+        job_objects: List[Job] = []
+        for link, job_data in unique_by_link.items():
+            print(job_data)
+            if link == "string" or "com.linkedin.common.Url":
+                continue
+            job_instance = Job(
+                title=job_data.get("title", "").strip() or "Untitled",
+                company=job_data.get("company", "").strip() or "Unknown company",
+                link=link.strip(),
+            )
+            job_objects.append(job_instance)
+
+        return job_objects
+
+
+    # --------------------------
+    # JSON parsing & recursive search
+    # --------------------------
+    def _try_parse_json_and_extract_jobs(self, text: str) -> List[Dict[str, str]]:
+        """
+        Attempt to json.loads(text) and recursively search for job nodes containing:
+        - navigationUrl (or similar)
+        - title or titleText / primary fields
+        - companyName / secondary fields
+        """
+        try:
+            data = json.loads(text)
+        except Exception:
+            return []
+
+        # Recursively walk the JSON looking for nodes with job URL hints
+        found = self._recursive_search_for_job_nodes(data)
+        return found
+
+    def _recursive_search_for_job_nodes(self, node: Any) -> List[Dict[str, str]]:
+        """
+        Walk dictionaries/lists looking for job info. Heuristics:
+        - node contains 'navigationUrl' -> candidate job
+        - or node contains 'jobPosting' / 'jobCard' structures
+        """
+        jobs = []
+
+        if isinstance(node, dict):
+            # Common LinkedIn keys that might include the URL
+            possible_url_fields = ["navigationUrl", "navigationUrlForTracking", "navigationUrlForJob", "jobUrl", "url"]
+            for field in possible_url_fields:
+                if field in node and node[field]:
+                    link = node[field]
+                    link_normal = self._normalize_link(link)
+                    if not link_normal:
+                        continue
+                    title = self._extract_title_from_node(node)
+                    company = self._extract_company_from_node(node)
+                    jobs.append({"title": title or None, "company": company or None, "link": link_normal})
+                    # continue scanning children; more info may exist deeper
+            # Some payloads wrap job info under specific keys
+            for key in ["jobPosting", "jobCard", "job", "jobPostings", "item", "elements"]:
+                if key in node and node[key]:
+                    jobs.extend(self._recursive_search_for_job_nodes(node[key]))
+            # Iterate children
+            for value in node.values():
+                jobs.extend(self._recursive_search_for_job_nodes(value))
+
+        elif isinstance(node, list):
+            for item in node:
+                jobs.extend(self._recursive_search_for_job_nodes(item))
+
+        return jobs
+
+    def _extract_title_from_node(self, node: Dict[str, Any]) -> str:
+        """
+        Try several common title locations in the node.
+        """
+        candidates = [
+            node.get("title"),
+            (node.get("titleText") or {}).get("text") if isinstance(node.get("titleText"), dict) else None,
+            (node.get("primaryText") or {}).get("text") if isinstance(node.get("primaryText"), dict) else None,
+            (node.get("headline") or {}).get("text") if isinstance(node.get("headline"), dict) else None,
+            node.get("name"),
+        ]
+        for c in candidates:
+            if c and isinstance(c, str) and c.strip():
+                return c.strip()
+        return None
+
+    def _extract_company_from_node(self, node: Dict[str, Any]) -> str:
+        """
+        Try several common company fields.
+        """
+        candidates = [
+            node.get("companyName"),
+            (node.get("secondaryTitleText") or {}).get("text") if isinstance(node.get("secondaryTitleText"), dict) else None,
+            (node.get("subtitle") or {}).get("text") if isinstance(node.get("subtitle"), dict) else None,
+            (node.get("company") or {}).get("name") if isinstance(node.get("company"), dict) else None,
+        ]
+        for c in candidates:
+            if c and isinstance(c, str) and c.strip():
+                return c.strip()
+        return None
+
+    def _normalize_link(self, link):
+        """
+        Normalize link: make absolute if it's relative, strip HTML-encoded sequences.
+        Handles non-string values safely.
+        """
+        if not link:
+            return None
+
+        # If LinkedIn gave us a nested object, try to extract something like {"url": "..."}
+        if isinstance(link, dict):
+            # Try to extract a useful value
+            possible_keys = ["url", "navigationUrl", "href"]
+            for key in possible_keys:
+                if key in link and isinstance(link[key], str):
+                    link = link[key]
+                    break
+            else:
+                # No valid string found
+                return None
+
+        # Make sure we’re dealing with a string
+        if not isinstance(link, str):
+            return None
+
+        # Unescape HTML entities
+        link = html.unescape(link).strip()
+
+        # Some links come as "/jobs/view/1234"; make them absolute
+        if link.startswith("/"):
+            link = f"https://www.linkedin.com{link}"
+
+        # Remove "navigationUrl:" prefix if present
+        if link.startswith("navigationUrl:"):
+            link = link.replace("navigationUrl:", "").strip()
+        print(link)
+
+        return link
+
+
+    # --------------------------
+    # Regex fallback extraction
+    # --------------------------
+    JOB_URL_REGEX = re.compile(r"(https?:\/\/www\.linkedin\.com\/jobs\/view\/[0-9]+[^\s\"'>]*)", flags=re.IGNORECASE)
+
+    def _regex_extract_jobs_from_text(self, text: str) -> List[Dict[str, str]]:
+        """
+        Fallback: search raw text for LinkedIn job URLs and try to extract title/company
+        from nearby text fragments.
+        """
+        jobs = []
+        for match in self.JOB_URL_REGEX.finditer(text):
+            url = match.group(1)
+            # attempt to find nearby title/company by searching some chars before/after the match
+            start, end = match.span()
+            window = text[max(0, start - 300): min(len(text), end + 300)]
+            title = self._extract_title_from_plain_text(window)
+            company = self._extract_company_from_plain_text(window)
+            jobs.append({"title": title or None, "company": company or None, "link": self._normalize_link(url)})
+        return jobs
+
+    # heuristics for plain-text title/company extraction
+    PLAIN_TITLE_REGEX = re.compile(r"\"title\"\s*:\s*\"([^\"]{3,200})\"", flags=re.IGNORECASE)
+    PLAIN_COMPANY_REGEX = re.compile(r"\"companyName\"\s*:\s*\"([^\"]{3,200})\"", flags=re.IGNORECASE)
+
+    def _extract_title_from_plain_text(self, text: str) -> str:
+        m = self.PLAIN_TITLE_REGEX.search(text)
+        if m:
+            return m.group(1).strip()
+        # fallback: look for human-readable phrases (very heuristic)
+        alt = re.search(r"([A-Z][A-Za-z0-9&\-\s]{3,60})\s*(?:at|@)\s*([A-Z][A-Za-z0-9&\-\s]{2,60})", text)
+        if alt:
+            return alt.group(1).strip()
+        return None
+
+    def _extract_company_from_plain_text(self, text: str) -> str:
+        m = self.PLAIN_COMPANY_REGEX.search(text)
+        if m:
+            return m.group(1).strip()
+        alt = re.search(r"(?:at|@)\s*([A-Z][A-Za-z0-9&\-\s]{2,60})", text)
+        if alt:
+            return alt.group(1).strip()
+        return None

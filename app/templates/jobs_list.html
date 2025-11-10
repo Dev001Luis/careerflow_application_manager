@@ -1,5 +1,5 @@
 {% if jobs and jobs|length > 0 %}
-<table class="table table-hover align-middle text-sm shadow-sm rounded-2 overflow-hidden">
+<table class="table table-hover align-middle text-sm shadow-sm rounded-2 overflow-hidden" data-ajax-target="#jobList" data-async-target="#jobList">
     <thead class="table-light">
         <tr>
             <th>Job Title</th>
@@ -7,6 +7,7 @@
             <th>Location</th>
             <th>Date Added</th>
             <th>Link</th>
+            <th>Cover Letter</th>
         </tr>
     </thead>
     <tbody>
@@ -20,13 +21,16 @@
                 <a href="{{ job.link }}" target="_blank" class="btn btn-outline-primary btn-sm">
                     View
                 </a>
+                <a href="{{ url_for('generate_pdf', job_id=job.id) }}" class="btn btn-outline-success btn-sm ms-1">
+                    <i class="fa-solid fa-file-pdf"></i>
+                </a>
             </td>
         </tr>
         {% endfor %}
     </tbody>
 </table>
 {% else %}
-<div class="alert alert-secondary text-center py-3 mt-2 rounded">
+<div class="alert alert-secondary text-center py-3 mt-2 rounded" data-ajax-target="#jobList" data-async-target="#jobList">
     <i class="fa-solid fa-circle-info me-2"></i>
     No jobs found yet — upload your LinkedIn saved-jobs HTML file to import them.
 </div>

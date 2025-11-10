@@ -21,6 +21,7 @@ class JobService:
 
         Returns the number of inserted records.
         """
+        print(parsed_jobs)
         inserted_count = 0
         for parsed_job in parsed_jobs:
             existing_job = Job.find_job_by_link_or_title(parsed_job.link, parsed_job.title)

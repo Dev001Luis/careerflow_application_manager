@@ -125,3 +125,25 @@ class Job:
                 return Job.from_row(row)
 
         return None
+
+    @classmethod
+    def get_job_by_id(job_id: int):
+        """
+        Fetch a single job entry from the database by its ID.
+
+        Args:
+            job_id (int): The ID of the job in the jobs table.
+
+        Returns:
+            dict | None: A dictionary of job data or None if not found.
+        """
+        from app.db import get_cursor
+        with get_cursor() as cursor:
+            cursor.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            columns = [col[0] for col in cursor.description]
+            print(columns)
+            return dict(zip(columns, row))

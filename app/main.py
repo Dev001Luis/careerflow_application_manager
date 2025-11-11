@@ -49,10 +49,11 @@ def upload_linkedin_file():
     print("raw_file ok")
     parser = LinkedInHtmlParser(raw_html)
     parsed_jobs = parser.extract_jobs_from_saved_page()
-    print("ho parsato i jobs")
-    print(parsed_jobs)
+    print("DEBUG → Parsed jobs:", parsed_jobs)
+    for j in parsed_jobs:
+        print("DEBUG each:", j, type(j))
+
     inserted_count = JobService.import_jobs_from_parser(parsed_jobs)
-    print(inserted_count)
 
     # Return both numeric result and updated partial HTML so the frontend can swap it in.
     jobs = JobService.get_all_jobs_for_display()

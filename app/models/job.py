@@ -57,6 +57,8 @@ class Job:
         Performs INSERT if self.id is None, otherwise UPDATE.
         Returns self with id populated after insert.
         """
+        print("ENTRAAA ???")
+        1/0
         if self.id:
             query = """
                 UPDATE jobs
@@ -81,6 +83,7 @@ class Job:
             )
             with get_cursor() as cursor:
                 cursor.execute(query, params)
+                print(query % params)
                 self.id = cursor.lastrowid
         return self
 
@@ -92,25 +95,38 @@ class Job:
             cursor.execute("DELETE FROM jobs WHERE id = %s", (self.id,))
         self.id = None
 
-    @staticmethod
-    def fetch_all_jobs(limit: int = 200) -> List["Job"]:
+    @classmethod
+    def fetch_all_jobs(cls) -> List["Job"]:
         """
         Fetch jobs from DB ordered by applied_date desc then id desc.
         Returns a list of Job instances.
         """
+        limit = 200
         query = "SELECT * FROM jobs ORDER BY applied_date DESC, id DESC LIMIT %s"
         with get_cursor() as cursor:
             cursor.execute(query, (limit,))
             rows = cursor.fetchall()
-        return [Job.from_row(row) for row in rows] if rows else []
+        print(rows)
+        return [
+            Job(
+                title=row["title"],
+                company=row["company"],
+                link=row["link"],
+                status=row["status"],
+                notes=row["notes"],
+            )
+            for row in rows
+        ] if rows else []
 
-    @staticmethod
+    @classmethod
     def find_job_by_link_or_title(link_value: Optional[str], title_value: str) -> Optional["Job"]:
         """
         Try to find an existing job either by exact link or by title/company combination.
         Returns Job or None.
         """
         if link_value:
+            print(type(link_value))
+            print(link_value)
             with get_cursor() as cursor:
                 cursor.execute("SELECT * FROM jobs WHERE link = %s LIMIT 1", (link_value,))
                 row = cursor.fetchone()
@@ -118,11 +134,11 @@ class Job:
                     return Job.from_row(row)
 
         # Fallback: try by title and company (may yield duplicates but prevents obvious duplication)
-        with get_cursor() as cursor:
-            cursor.execute("SELECT * FROM jobs WHERE title = %s LIMIT 1", (title_value,))
-            row = cursor.fetchone()
-            if row:
-                return Job.from_row(row)
+        # with get_cursor() as cursor:
+        #     cursor.execute("SELECT * FROM jobs WHERE title = %s LIMIT 1", (title_value,))
+        #     row = cursor.fetchone()
+        #     if row:
+        #         return Job.from_row(row)
 
         return None
 

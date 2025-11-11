@@ -20,18 +20,28 @@ class LinkedInHtmlParser:
     def __init__(self, raw_html: str):
         self.soup = BeautifulSoup(raw_html, "html.parser")
 
-    def extract_jobs_from_saved_page(self): # -> List[Job]:
+    def extract_jobs_from_saved_page(self):
         """
         Top-level entrypoint.
         Parse the LinkedIn HTML, extract job data (title, company, link),
         deduplicate by link, and return a list of Job objects.
+
+        This version is defensive:
+        - ensures 'link' is a real string before using string methods
+        - skips common LinkedIn placeholder values
+        - converts the final deduplicated dicts into Job instances
         """
-        from app.models.job import Job  # imported here to avoid circular import
+        from app.models.job import Job  # local import to avoid circular dependency
+        import logging
+
+        logger = logging.getLogger(__name__)
 
         collected_jobs: List[Dict[str, str]] = []
 
         # Look in <code> and <script> tags for embedded JSON
         candidate_tags = self.soup.find_all(["code", "script"])
+        numero = len(candidate_tags)
+        logger.debug("Number of candidate tags found: %s", numero)
 
         for tag in candidate_tags:
             text = tag.get_text(separator="", strip=True)
@@ -42,13 +52,24 @@ class LinkedInHtmlParser:
             unescaped_text = html.unescape(text)
 
             # Try JSON parse first
-            parsed_jobs = self._try_parse_json_and_extract_jobs(unescaped_text)
+            try:
+                parsed_jobs = self._try_parse_json_and_extract_jobs(unescaped_text)
+            except Exception as e:
+                logger.debug("JSON parse attempt raised: %s", e)
+                parsed_jobs = []
+
             if parsed_jobs:
+                # Expect parsed_jobs to be a list of dicts like {"title":..., "company":..., "link":...}
                 collected_jobs.extend(parsed_jobs)
                 continue
 
             # Fallback to regex
-            fallback_jobs = self._regex_extract_jobs_from_text(unescaped_text)
+            try:
+                fallback_jobs = self._regex_extract_jobs_from_text(unescaped_text)
+            except Exception as e:
+                logger.debug("Regex fallback raised: %s", e)
+                fallback_jobs = []
+
             if fallback_jobs:
                 collected_jobs.extend(fallback_jobs)
 
@@ -56,13 +77,24 @@ class LinkedInHtmlParser:
         unique_by_link: Dict[str, Dict[str, str]] = {}
         for job in collected_jobs:
             link = job.get("link")
-            if not link:
+            # Skip if no link or link is not a string
+            if not link or not isinstance(link, str):
                 continue
-            if link not in unique_by_link:
-                unique_by_link[link] = job
+
+            # Clean whitespace early
+            link_clean = link.strip()
+
+            # Skip obvious placeholder values that LinkedIn sometimes includes
+            # (adjust these patterns to match any observed placeholders)
+            if link_clean.lower() in ("string", "null") or "com.linkedin.common.Url" in link_clean:
+                continue
+
+            if link_clean not in unique_by_link:
+                unique_by_link[link_clean] = job.copy()
+                unique_by_link[link_clean]["link"] = link_clean
             else:
                 # merge missing fields
-                existing = unique_by_link[link]
+                existing = unique_by_link[link_clean]
                 if not existing.get("title") and job.get("title"):
                     existing["title"] = job["title"]
                 if not existing.get("company") and job.get("company"):
@@ -71,17 +103,28 @@ class LinkedInHtmlParser:
         # Convert dicts → Job objects for consistency with the service layer
         job_objects: List[Job] = []
         for link, job_data in unique_by_link.items():
-            print(job_data)
-            if link == "string" or "com.linkedin.common.Url":
+            # Defensive extraction of title/company
+            raw_title = job_data.get("title") or ""
+            raw_company = job_data.get("company") or ""
+
+            title = raw_title.strip() if isinstance(raw_title, str) else "Untitled"
+            company = raw_company.strip() if isinstance(raw_company, str) else "Unknown company"
+
+            # Final safety: ensure link is string and non-empty
+            if not link or not isinstance(link, str):
+                logger.debug("Skipping non-string or empty link during final conversion: %r", link)
                 continue
             job_instance = Job(
-                title=job_data.get("title", "").strip() or "Untitled",
-                company=job_data.get("company", "").strip() or "Unknown company",
+                title=title,
+                company=company,
                 link=link.strip(),
             )
             job_objects.append(job_instance)
 
+
+        logger.debug("Extracted %d Job objects", len(job_objects))
         return job_objects
+
 
 
     # --------------------------
@@ -117,25 +160,31 @@ class LinkedInHtmlParser:
             for field in possible_url_fields:
                 if field in node and node[field]:
                     link = node[field]
+                    print("link : %s " % link)
                     link_normal = self._normalize_link(link)
-                    if not link_normal:
+                    print("linnk normal : %s " % link_normal)
+                    if not link_normal or isinstance(link, dict):
                         continue
                     title = self._extract_title_from_node(node)
                     company = self._extract_company_from_node(node)
                     jobs.append({"title": title or None, "company": company or None, "link": link_normal})
                     # continue scanning children; more info may exist deeper
             # Some payloads wrap job info under specific keys
+            num = len(jobs)
+            print("la len di jobs ora è : %s " % num)
             for key in ["jobPosting", "jobCard", "job", "jobPostings", "item", "elements"]:
                 if key in node and node[key]:
                     jobs.extend(self._recursive_search_for_job_nodes(node[key]))
             # Iterate children
+            print("la len di jobs ora è : %s " % num)
             for value in node.values():
                 jobs.extend(self._recursive_search_for_job_nodes(value))
+            print("la len di jobs ora è : %s " % num)
 
         elif isinstance(node, list):
             for item in node:
                 jobs.extend(self._recursive_search_for_job_nodes(item))
-
+        print(jobs)
         return jobs
 
     def _extract_title_from_node(self, node: Dict[str, Any]) -> str:
